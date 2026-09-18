@@ -1,0 +1,15 @@
+[package]
+name = "strictdu"
+version = "0.1.0"
+edition = "2021"
+authors = ["pine-lantern"]
+license = "MIT"
+description = "A strict-by-default disk usage scanner"
+
+[lib]
+name = "strictdu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "strictdu"
+path = "src/main.rs"
