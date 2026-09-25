@@ -20,13 +20,19 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Controls how a scan reacts to I/O errors encountered while walking.
+/// Controls how a scan reacts to I/O errors encountered while walking,
+/// and how much of the tree it breaks out into separate entries.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScanOptions {
     /// If false (the default), the first I/O error aborts the scan.
     /// If true, the offending entry is skipped and added to
     /// `ScanReport.warnings` instead.
     pub lenient: bool,
+    /// How many levels below `root` get their own `Entry` in the
+    /// report. `None` behaves like `Some(1)`: only `root`'s direct
+    /// children are listed. This never affects `total_bytes`, which
+    /// always reflects a full recursive scan regardless of depth.
+    pub max_depth: Option<u32>,
 }
 
 /// One skipped entry, only ever populated in lenient mode.
@@ -36,11 +42,16 @@ pub struct Warning {
     pub message: String,
 }
 
-/// A single direct child of the scanned root, with its total size.
+/// A single entry in the report: a path and its total size, with any
+/// deeper breakdown `ScanOptions.max_depth` allowed.
 #[derive(Debug)]
 pub struct Entry {
     pub path: PathBuf,
     pub bytes: u64,
+    /// Direct children of this entry, sorted largest first. Empty
+    /// unless this entry is a directory and its depth was within
+    /// `max_depth`.
+    pub children: Vec<Entry>,
 }
 
 /// The result of a completed scan.
@@ -95,6 +106,7 @@ pub fn scan(root: &Path, options: ScanOptions) -> Result<ScanReport, ScanError> 
         report.entries.push(Entry {
             path: root.to_path_buf(),
             bytes: root_meta.len(),
+            children: Vec::new(),
         });
         return Ok(report);
     }
@@ -123,10 +135,10 @@ pub fn scan(root: &Path, options: ScanOptions) -> Result<ScanReport, ScanError> 
         };
 
         let path = dir_entry.path();
-        match subtree_size(&path, &options, &mut report) {
-            Ok(bytes) => {
-                report.total_bytes += bytes;
-                report.entries.push(Entry { path, bytes });
+        match subtree_entry(&path, &options, 1, &mut report) {
+            Ok(entry) => {
+                report.total_bytes += entry.bytes;
+                report.entries.push(entry);
             }
             Err(e) => {
                 if options.lenient {
@@ -145,17 +157,30 @@ pub fn scan(root: &Path, options: ScanOptions) -> Result<ScanReport, ScanError> 
     Ok(report)
 }
 
-/// Sum the apparent size of everything under `path`. In lenient mode
-/// this never fails: unreadable subtrees just contribute 0 and are
-/// logged to `report.warnings`.
-fn subtree_size(path: &Path, options: &ScanOptions, report: &mut ScanReport) -> Result<u64, ScanError> {
+/// Build the entry for everything under `path`, at the given depth
+/// below `root` (`path`'s own direct children are `depth + 1`).
+///
+/// The returned `bytes` always reflects the full subtree regardless of
+/// `max_depth` — only whether the breakdown is kept in `children` is
+/// depth-limited. In lenient mode this never fails: unreadable
+/// subtrees just contribute 0 and are logged to `report.warnings`.
+fn subtree_entry(
+    path: &Path,
+    options: &ScanOptions,
+    depth: u32,
+    report: &mut ScanReport,
+) -> Result<Entry, ScanError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) => return recover(path, e, options, report),
     };
 
     if metadata.is_file() {
-        return Ok(metadata.len());
+        return Ok(Entry {
+            path: path.to_path_buf(),
+            bytes: metadata.len(),
+            children: Vec::new(),
+        });
     }
 
     if !metadata.is_dir() {
@@ -175,11 +200,18 @@ fn subtree_size(path: &Path, options: &ScanOptions, report: &mut ScanReport) -> 
         Err(e) => return recover(path, e, options, report),
     };
 
+    let keep_children = depth < options.max_depth.unwrap_or(1);
     let mut total = 0u64;
+    let mut children = Vec::new();
     for item in read_dir {
         match item {
-            Ok(child) => match subtree_size(&child.path(), options, report) {
-                Ok(bytes) => total += bytes,
+            Ok(child) => match subtree_entry(&child.path(), options, depth + 1, report) {
+                Ok(entry) => {
+                    total += entry.bytes;
+                    if keep_children {
+                        children.push(entry);
+                    }
+                }
                 Err(e) => {
                     if options.lenient {
                         report.warnings.push(Warning {
@@ -195,18 +227,32 @@ fn subtree_size(path: &Path, options: &ScanOptions, report: &mut ScanReport) -> 
         }
     }
 
-    Ok(total)
+    children.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    Ok(Entry {
+        path: path.to_path_buf(),
+        bytes: total,
+        children,
+    })
 }
 
 /// Either bail out with a `ScanError` (strict) or record a warning and
-/// carry on with a zero contribution (lenient).
-fn recover(path: &Path, err: io::Error, options: &ScanOptions, report: &mut ScanReport) -> Result<u64, ScanError> {
+/// carry on with a zero-byte, childless entry (lenient).
+fn recover(
+    path: &Path,
+    err: io::Error,
+    options: &ScanOptions,
+    report: &mut ScanReport,
+) -> Result<Entry, ScanError> {
     if options.lenient {
         report.warnings.push(Warning {
             path: path.to_path_buf(),
             message: err.to_string(),
         });
-        Ok(0)
+        Ok(Entry {
+            path: path.to_path_buf(),
+            bytes: 0,
+            children: Vec::new(),
+        })
     } else {
         Err(ScanError {
             path: path.to_path_buf(),

@@ -19,6 +19,12 @@ with a non-zero exit and an error naming the exact path, unless you pass
 `--lenient`, in which case it behaves like traditional `du` — skip what
 it can't read, keep going, and tell you what it skipped.
 
+By default it only breaks the total down by the root's direct children.
+Pass `--max-depth N` to also break out entries N levels deeper, indented
+under their parent. The grand total is always computed from the full
+tree regardless of `--max-depth` — the flag only changes how much of
+the breakdown gets printed.
+
 ## Usage
 
 ```
@@ -51,7 +57,7 @@ $ strictdu --lenient /var/log
 ## As a library
 
 ```rust
-let options = strictdu::ScanOptions { lenient: false };
+let options = strictdu::ScanOptions { lenient: false, max_depth: None };
 let report = strictdu::scan(std::path::Path::new("."), options)?;
 
 for entry in &report.entries {
@@ -59,6 +65,10 @@ for entry in &report.entries {
 }
 println!("total: {} bytes", report.total_bytes);
 ```
+
+Each `Entry` also carries `children: Vec<Entry>`, populated with the
+next level of breakdown when `max_depth` allows it (empty by default,
+since `max_depth: None` behaves like `Some(1)`).
 
 `scan` returns a `Result<ScanReport, ScanError>`. In lenient mode it
 practically never errors — failures are folded into `report.warnings`
@@ -74,8 +84,8 @@ contribute the sum of what's under them, not their own inode size.
 
 ## Status
 
-Early skeleton. Single-threaded, no exclude patterns, no depth limit,
-no machine-readable output yet.
+Early skeleton. Single-threaded, no exclude patterns, no machine-readable
+output yet, apparent size only (not blocks allocated on disk).
 
 ## License
 
